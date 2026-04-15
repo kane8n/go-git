@@ -36,6 +36,10 @@ type PackWriter struct {
 	result   chan error
 	format   formatcfg.ObjectFormat
 	writeRev bool
+	// Promisor, when true, creates a .promisor marker file alongside
+	// the packfile. This marks the pack as coming from a partial clone
+	// (filtered fetch) where missing objects can be fetched on demand.
+	Promisor bool
 }
 
 func newPackWrite(fs billy.Filesystem, format formatcfg.ObjectFormat, writeRev bool) (*PackWriter, error) {
@@ -206,6 +210,24 @@ func (w *PackWriter) save() error {
 	} else {
 		// Pack already exists, clean up the temp file.
 		return w.clean()
+	}
+
+	if w.Promisor {
+		promisorPath := fmt.Sprintf("%s.promisor", base)
+		exists, err := fileExists(w.fs, promisorPath)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			f, err := w.fs.Create(promisorPath)
+			if err != nil {
+				return err
+			}
+			if err := f.Close(); err != nil {
+				return err
+			}
+			fixPermissions(w.fs, promisorPath)
+		}
 	}
 
 	return nil

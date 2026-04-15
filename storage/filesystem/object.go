@@ -50,6 +50,10 @@ type ObjectStorage struct {
 	alternatesInit bool
 	alternatesErr  error
 	muA            sync.RWMutex
+
+	// promisor marks new packfiles written via PackfileWriter as promisor
+	// packs (creates a .promisor marker file alongside the pack).
+	promisor bool
 }
 
 // NewObjectStorage creates a new ObjectStorage with the given .git directory and cache.
@@ -292,6 +296,12 @@ func (s *ObjectStorage) NewEncodedObject() plumbing.EncodedObject {
 	return plumbing.NewMemoryObject(s.oh)
 }
 
+// SetPromisor configures whether new packfiles created via PackfileWriter
+// should be marked as promisor packs (with a .promisor marker file).
+func (s *ObjectStorage) SetPromisor(v bool) {
+	s.promisor = v
+}
+
 // PackfileWriter returns a writer for creating a new packfile.
 func (s *ObjectStorage) PackfileWriter() (io.WriteCloser, error) {
 	if err := s.requireIndex(); err != nil {
@@ -302,6 +312,8 @@ func (s *ObjectStorage) PackfileWriter() (io.WriteCloser, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	w.Promisor = s.promisor
 
 	w.Notify = func(h plumbing.Hash, writer *idxfile.Writer) {
 		index, err := writer.Index()

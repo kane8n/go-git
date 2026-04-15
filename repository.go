@@ -24,6 +24,7 @@ import (
 	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/format/packfile"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v6/plumbing/storer"
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/storage"
@@ -441,7 +442,12 @@ func PlainOpenWithOptions(path string, o *PlainOpenOptions) (*Repository, error)
 
 	s := filesystem.NewStorage(repositoryFs, cache.NewObjectLRUDefault())
 
-	return Open(s, wt)
+	r, err := Open(s, wt)
+	if err != nil {
+		return nil, err
+	}
+	r.Storer = wrapStorerIfPromisor(r.Storer, nil)
+	return r, nil
 }
 
 func dotGitToOSFilesystems(path string, detect bool) (dot, wt billy.Filesystem, err error) {
@@ -1105,6 +1111,15 @@ func (r *Repository) clone(ctx context.Context, o *CloneOptions) error {
 		}
 	}
 
+	// When cloning with a filter (partial clone), mark packfiles received
+	// during the initial fetch as promisor packs (.promisor marker file).
+	if o.Filter != "" {
+		if fs, ok := r.Storer.(*filesystem.Storage); ok {
+			fs.SetPromisor(true)
+			defer fs.SetPromisor(false)
+		}
+	}
+
 	ref, err := r.fetchAndUpdateReferences(ctx, &FetchOptions{
 		RefSpecs:      c.Fetch,
 		Depth:         o.Depth,
@@ -1124,9 +1139,26 @@ func (r *Repository) clone(ctx context.Context, o *CloneOptions) error {
 		return err
 	}
 
+	// For partial clones, persist promisor remote config and upgrade
+	// the repository format version to 1.
+	if o.Filter != "" {
+		if err := r.savePartialCloneConfig(o.RemoteName, o.Filter); err != nil {
+			return err
+		}
+	}
+
 	err = r.setWorktreeAndStoragePaths()
 	if err != nil {
 		return err
+	}
+
+	// Wrap the storer after setWorktreeAndStoragePaths (which needs the
+	// unwrapped fsBased interface) but before checkout (which needs
+	// on-demand fetch for missing blobs).
+	if o.Filter != "" {
+		r.Storer = wrapStorerIfPromisor(r.Storer, &promisorOptions{
+			ClientOptions: o.ClientOptions,
+		})
 	}
 
 	if r.wt != nil && !o.NoCheckout {
@@ -1188,6 +1220,27 @@ func (r *Repository) clone(ctx context.Context, o *CloneOptions) error {
 	}
 
 	return nil
+}
+
+// savePartialCloneConfig upgrades the repository format version to 1 and
+// persists the promisor remote config for a partial clone, matching the
+// behavior of modern git.
+func (r *Repository) savePartialCloneConfig(remoteName string, filter packp.Filter) error {
+	cfg, err := r.Config()
+	if err != nil {
+		return err
+	}
+
+	cfg.Core.RepositoryFormatVersion = formatcfg.Version1
+
+	rc, ok := cfg.Remotes[remoteName]
+	if !ok {
+		return fmt.Errorf("remote %q not found in config", remoteName)
+	}
+	rc.Promisor = true
+	rc.PartialCloneFilter = string(filter)
+
+	return r.Storer.SetConfig(cfg)
 }
 
 const (
